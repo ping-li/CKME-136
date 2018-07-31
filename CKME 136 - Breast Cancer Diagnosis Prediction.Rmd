@@ -1,0 +1,355 @@
+---
+title: "CKME 136 - Breast Cancer Diagnosis"
+author: "Ping Li"
+date: "July 24, 2018"
+output: 
+  html_document:
+    toc: yes
+    theme: yeti
+    highlight: tango
+---
+
+# Preparation and Data Import
+
+## Loading packages
+```{r}
+library(plyr)
+library(tidyverse)
+library(caret)
+library(caretEnsemble)
+library(funModeling)
+library(corrplot)
+library(factoextra)
+library(C50)
+library(naivebayes)
+library(fastAdaboost)
+set.seed(44)
+```
+
+## Uploading dataset
+```{r}
+wdbc <- read_csv("https://raw.githubusercontent.com/ping-li/CKME-136/master/data.csv")
+```
+
+Taking a look at the data:
+```{r}
+head(wdbc)
+```
+
+# Data Cleaning and Exploratory Data Analysis
+
+## Checking for missing values, attribute types, and formatting
+
+Taking a look at the structure of each variable:
+```{r}
+str(wdbc)
+```
+
+Upon inspection, it looks like every attribute is listed as an integer except for the 'bare_nucleoli' attribute. It must contain some non-integer values, so we will convert to integer and check for NA values. We will also change the name of the class attribute to 'diagnosis' and convert into a factor.
+
+```{r}
+wdbc$bare_nucleoli <- as.integer(wdbc$bare_nucleoli)
+sapply(wdbc, function(x) sum(is.na(x))) %>% data.frame #Check for NA values
+wdbc <- na.omit(wdbc) #Removing records with NA
+names(wdbc) <- c(names(wdbc[1:10]),"diagnosis")
+wdbc$diagnosis <- as.factor(wdbc$diagnosis)
+wdbc$diagnosis <- mapvalues(wdbc$diagnosis, c(2,4), c("Benign","Malignant"))
+```
+
+We can also remove the 'id' attribute as it simply serves as a unique identifier and does not contribute any predictive value. We can also separate into attributes and class.
+
+```{r}
+wdbc <- wdbc[,-1]
+wdbc_a <- wdbc[,1:9] # WDBC attributes
+wdbc_c <- wdbc$diagnosis # WDBC class attribute
+```
+
+## Distribution plots of each attribute
+
+```{r}
+plot_num(wdbc_a)
+ggplot(wdbc) + geom_density(aes(x=clump_thickness, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=size_uniformity, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=shape_uniformity, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=marginal_adhesion, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=epithelial_size, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=bare_nucleoli, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=bland_chromatin, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=normal_nucleoli, fill = diagnosis), alpha=0.3)
+ggplot(wdbc) + geom_density(aes(x=mitoses, fill = diagnosis), alpha=0.3)
+```
+
+```{r}
+freq(wdbc_c) # 65% Benign and 35% Malignant
+```
+
+```{r}
+wdbc_a %>% cor %>% corrplot
+```
+
+It appears that many of our attributes are strongly positively correlated.
+
+# Data pre-processing
+
+## PCA
+
+Seeing has how a lot of the attributes are strongly correlated, we will use PCA to convert attributes into a set of uncorrelated components.
+
+```{r}
+pca_wdbc <- princomp(wdbc_a) # PCA on attributes
+pc_wdbc <- pca_wdbc$scores # PCA scores
+full_wdbc <- data.frame(pc_wdbc,wdbc_c) # Combining PC with class attribute
+```
+
+Taking a look at the resulting principal components:
+
+```{r}
+summary(pca_wdbc)
+fviz_eig(pca_wdbc, addlabels = TRUE, ylim = c(0,100), barfill = "steelblue1", line="navy") + 
+  theme_classic() +
+  labs(x = "Principal Components", y = "% of Explained Variance", title = "WDBC - Principal Components")
+```
+
+We see that 69% of the variance is explained by the first principal component.
+
+# Individual machine learning models
+
+## Model Creation
+
+Models will be created using 5-fold cross-validation, given the relatively small sample size of the dataset. Setting parameters below:
+
+```{r}
+# Setting up 5-fold cross-validation
+ctrl <- trainControl(method = "cv",
+                     number = 5)
+
+# Function for plotting confusion matrices
+cm_plot <- function(ml, title) {
+  confusionMatrix(ml)$table %>%
+    round(1) %>%
+    fourfoldplot(
+      color = c("#CC6666", "#99CC99"),
+      main=title, 
+      conf.level=0, 
+      margin=1
+    )
+}
+```
+
+### Decision Tree
+
+```{r}
+# Using C5.0 algorithm
+c50.ml <- train(wdbc_c~., full_wdbc, method = "C5.0", trControl = ctrl)
+c50.cm <- confusionMatrix(c50.ml)
+cm_plot(c50.ml, "C5.0")
+c50.metrics <- data.frame (
+  "Model" = "C5.0",
+  "Accuracy" = (c50.cm$table[1,1] + c50.cm$table[2,2])/100,
+  "Recall" = c50.cm$table[2,2] / (c50.cm$table[2,2] + c50.cm$table[1,2]), #True positive rate
+  "Precision" = c50.cm$table[2,2] / (c50.cm$table[2,1] + c50.cm$table[2,2]), 
+  "FNR" = (c50.cm$table[1,2] / (c50.cm$table[2,2] + c50.cm$table[1,2])), #False negative rate
+  "Fscore" = (2 * c50.cm$table[2,2]) / (2 * c50.cm$table[2,2] + c50.cm$table[1,2] + c50.cm$table[2,1])
+)
+c50.metrics
+```
+
+
+### k-Nearest Neighbours
+
+```{r}
+knn.ml <- train(wdbc_c~., full_wdbc, method = "knn", trControl =ctrl)
+knn.cm <- confusionMatrix(knn.ml)
+cm_plot(knn.ml, "kNN")
+knn.metrics <- data.frame (
+  "Model" = "k-NN",
+  "Accuracy" = (knn.cm$table[1,1] + knn.cm$table[2,2])/100,
+  "Recall" = knn.cm$table[2,2] / (knn.cm$table[2,2] + knn.cm$table[1,2]),
+  "Precision" = knn.cm$table[2,2] / (knn.cm$table[2,1] + knn.cm$table[2,2]),
+  "FNR" = (knn.cm$table[1,2] / (knn.cm$table[2,2] + knn.cm$table[1,2])),
+  "Fscore" = (2 * knn.cm$table[2,2]) / (2 * knn.cm$table[2,2] + knn.cm$table[1,2] + knn.cm$table[2,1])
+)
+knn.metrics
+```
+
+### Naive Bayes
+
+```{r}
+nb.ml <- train(wdbc_c~., full_wdbc, method = "naive_bayes", trControl =ctrl)
+nb.cm <- confusionMatrix(nb.ml)
+cm_plot(nb.ml, "Naive Bayes")
+nb.metrics <- data.frame (
+  "Model" = "Naive Bayes",
+  "Accuracy" = (nb.cm$table[1,1] + nb.cm$table[2,2])/100,
+  "Recall" = nb.cm$table[2,2] / (nb.cm$table[2,2] + nb.cm$table[1,2]),
+  "Precision" = nb.cm$table[2,2] / (nb.cm$table[2,1] + nb.cm$table[2,2]),
+  "FNR" = (nb.cm$table[1,2] / (nb.cm$table[2,2] + nb.cm$table[1,2])),
+  "Fscore" = (2 * nb.cm$table[2,2]) / (2 * nb.cm$table[2,2] + nb.cm$table[1,2] + nb.cm$table[2,1])
+)
+nb.metrics
+```
+
+### Logistic Regression
+
+```{r}
+logit.ml <- train(wdbc_c~., full_wdbc, method = "glm", family = "binomial", trControl =ctrl)
+logit.cm <- confusionMatrix(logit.ml)
+cm_plot(logit.ml, "Logistic Regression")
+logit.metrics <- data.frame (
+  "Model" = "Logistic Regression",
+  "Accuracy" = (logit.cm$table[1,1] + logit.cm$table[2,2])/100,
+  "Recall" = logit.cm$table[2,2] / (logit.cm$table[2,2] + logit.cm$table[1,2]),
+  "Precision" = logit.cm$table[2,2] / (logit.cm$table[2,1] + logit.cm$table[2,2]),
+  "FNR" = (logit.cm$table[1,2] / (logit.cm$table[2,2] + logit.cm$table[1,2])),
+  "Fscore" = (2 * logit.cm$table[2,2]) / (2 * logit.cm$table[2,2] + logit.cm$table[1,2] + logit.cm$table[2,1])
+)
+logit.metrics
+```
+
+### Support Vector Machine (SVM)
+
+```{r}
+svm.ml <- train(wdbc_c~., full_wdbc, method = "svmRadial", trControl =ctrl)
+svm.cm <- confusionMatrix(svm.ml)
+cm_plot(svm.ml, "SVM")
+svm.metrics <- data.frame (
+  "Model" = "SVM",
+  "Accuracy" = (svm.cm$table[1,1] + svm.cm$table[2,2])/100,
+  "Recall" = svm.cm$table[2,2] / (svm.cm$table[2,2] + svm.cm$table[1,2]),
+  "Precision" = svm.cm$table[2,2] / (svm.cm$table[2,1] + svm.cm$table[2,2]),
+  "FNR" = (svm.cm$table[1,2] / (svm.cm$table[2,2] + svm.cm$table[1,2])),
+  "Fscore" = (2 * svm.cm$table[2,2]) / (2 * svm.cm$table[2,2] + svm.cm$table[1,2] + svm.cm$table[2,1])
+)
+svm.metrics
+```
+
+## Model Performance
+
+```{r}
+metrics1 <- rbind(c50.metrics, knn.metrics, nb.metrics, logit.metrics, svm.metrics)
+metrics1 # Taking a look at everything together
+```
+
+```{r}
+ggplot(metrics1, aes(Model, Accuracy)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("Accuracy")
+ggplot(metrics1, aes(Model, Recall)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("Recall")
+ggplot(metrics1, aes(Model, Precision)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.8,1)) + ggtitle("Precision")
+ggplot(metrics1, aes(Model, FNR)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0,0.05)) + ggtitle("False Negative Rate")
+ggplot(metrics1, aes(Model, Fscore)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("F score")
+```
+
+# Ensemble learning models
+
+## Model Creation
+
+### Bagging - Random Forest
+
+```{r}
+rf.ml <- train(wdbc_c~., full_wdbc, method = "rf", trControl =ctrl)
+rf.cm <- confusionMatrix(rf.ml)
+cm_plot(rf.ml, "Random Forest")
+rf.metrics <- data.frame (
+  "Model" = "Random Forest",
+  "Accuracy" = (rf.cm$table[1,1] + rf.cm$table[2,2])/100,
+  "Recall" = rf.cm$table[2,2] / (rf.cm$table[2,2] + rf.cm$table[1,2]),
+  "Precision" = rf.cm$table[2,2] / (rf.cm$table[2,1] + rf.cm$table[2,2]),
+  "FNR" = (rf.cm$table[1,2] / (rf.cm$table[2,2] + rf.cm$table[1,2])),
+  "Fscore" = (2 * rf.cm$table[2,2]) / (2 * rf.cm$table[2,2] + rf.cm$table[1,2] + rf.cm$table[2,1])
+)
+rf.metrics
+```
+
+### Boosting - AdaBoost
+
+```{r}
+ada.ml <- train(wdbc_c~., full_wdbc, method = "adaboost", trControl =ctrl)
+ada.cm <- confusionMatrix(ada.ml)
+cm_plot(ada.ml, "AdaBoost")
+ada.metrics <- data.frame (
+  "Model" = "AdaBoost",
+  "Accuracy" = (ada.cm$table[1,1] + ada.cm$table[2,2])/100,
+  "Recall" = ada.cm$table[2,2] / (ada.cm$table[2,2] + ada.cm$table[1,2]),
+  "Precision" = ada.cm$table[2,2] / (ada.cm$table[2,1] + ada.cm$table[2,2]),
+  "FNR" = (ada.cm$table[1,2] / (ada.cm$table[2,2] + ada.cm$table[1,2])),
+  "Fscore" = (2 * ada.cm$table[2,2]) / (2 * ada.cm$table[2,2] + ada.cm$table[1,2] + ada.cm$table[2,1])
+)
+ada.metrics
+```
+
+### Boosting - Gradient Boosting Machine
+
+```{r}
+gbm.ml <- train(wdbc_c~., full_wdbc, method = "gbm", trControl =ctrl)
+gbm.cm <- confusionMatrix(gbm.ml)
+cm_plot(gbm.ml, "GBM")
+gbm.metrics <- data.frame (
+  "Model" = "GBM",
+  "Accuracy" = (gbm.cm$table[1,1] + gbm.cm$table[2,2])/100,
+  "Recall" = gbm.cm$table[2,2] / (gbm.cm$table[2,2] + gbm.cm$table[1,2]),
+  "Precision" = gbm.cm$table[2,2] / (gbm.cm$table[2,1] + gbm.cm$table[2,2]),
+  "FNR" = (gbm.cm$table[1,2] / (gbm.cm$table[2,2] + gbm.cm$table[1,2])),
+  "Fscore" = (2 * gbm.cm$table[2,2]) / (2 * gbm.cm$table[2,2] + gbm.cm$table[1,2] + gbm.cm$table[2,1])
+)
+gbm.metrics
+```
+
+### Stacking - Putting it all together
+
+```{r}
+ml_set <- c("C5.0","knn","naive_bayes","glm","svmRadial")
+ctrl2 <- trainControl(method = "cv", number = 5, savePredictions = "final", summaryFunction = twoClassSummary, classProbs = TRUE, verboseIter = TRUE)
+ml_list <- caretList(wdbc_c~., full_wdbc, methodList = ml_set, trControl = ctrl2)
+stack.ml <- caretStack(ml_list, method = "glm", metric = "Accuracy", trControl = ctrl2) # Highest Accuracy from stacking GLM
+stack.cm <- confusionMatrix(predict(stack.ml,full_wdbc[,1:9]), full_wdbc$wdbc_c)
+cm_plot(stack.cm$table/6.83,"Test")
+stack.metrics <- data.frame (
+  "Model" = "Stack",
+  "Accuracy" = (stack.cm$table[1,1] + stack.cm$table[2,2])/683,
+  "Recall" = stack.cm$table[2,2] / (stack.cm$table[2,2] + stack.cm$table[1,2]),
+  "Precision" = stack.cm$table[2,2] / (stack.cm$table[2,1] + stack.cm$table[2,2]),
+  "FNR" = (stack.cm$table[1,2] / (stack.cm$table[2,2] + stack.cm$table[1,2])),
+  "Fscore" = (2 * stack.cm$table[2,2]) / (2 * stack.cm$table[2,2] + stack.cm$table[1,2] + stack.cm$table[2,1])
+)
+stack.metrics
+```
+
+## Model Performance
+
+Taking a look at all confusion matrices:
+
+```{r}
+par(mfrow=c(3,3))
+cm_plot(c50.ml, "C5.0")
+cm_plot(knn.ml, "k-NN")
+cm_plot(nb.ml, "Naive Bayes")
+cm_plot(logit.ml, "Logistic Regression")
+cm_plot(svm.ml, "SVM")
+cm_plot(rf.ml, "Random Forest")
+cm_plot(ada.ml, "AdaBoost")
+cm_plot(gbm.ml, "GBM")
+cm_plot(stack.cm$table/6.83,"Stack")
+```
+
+Looking at model performance metrics:
+
+```{r}
+metrics2 <- rbind(metrics1, rf.metrics, ada.metrics, gbm.metrics, stack.metrics)
+metrics2 # Putting all performance measures together
+```
+
+```{r} 
+ggplot(metrics2, aes(Model, Accuracy)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("Accuracy")
+ggplot(metrics2, aes(Model, Recall)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("Recall")
+ggplot(metrics2, aes(Model, Precision)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.8,1)) + ggtitle("Precision")
+ggplot(metrics2, aes(Model, FNR)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0,0.05)) + ggtitle("False Negative Rate")
+ggplot(metrics2, aes(Model, Fscore)) + geom_bar(stat="identity", aes(fill=Model)) + coord_cartesian(ylim=c(0.9,1)) + ggtitle("F score")
+```
+
+# Conclusion
+
+* Stacked model combining C5.0, k-NN, NB, Logistic regression, and SVM had highest reported performance metrics based on 5-fold CV.
+* C5.0 Decision tree model performance equally well in terms of false negative rate (if we were to consider minimizing missed diagnoses).
+* Given the extremely small sample size, issues of overfitting definitely exist.
+    + Best way to counteract this would be to get more data, but healthcare domain isn't the most publically available.
+* In terms of usage and application to actual clinicians, a more user-friendly application could serve well
+    + Perhaps a shiny app to run stacking model, if there was a possibility to automate calculations from tumor FNBs.
